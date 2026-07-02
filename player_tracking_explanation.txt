@@ -1,0 +1,60 @@
+Pipeline de détection et suivi des joueurs
+
+Dans ce projet, le suivi des joueurs se fait principalement dans `player.py` avec la classe `PlayerTracker` définie dans `trackers/players_tracker/players_tracker.py`.
+
+1. Détection image par image
+- `player.py` lit la vidéo et extrait les images avec `sv.get_video_frames_generator(...)`.
+- Chaque image est convertie de BGR vers RGB avant d'entrer dans le modèle.
+- Un modèle YOLO (`ultralytics.YOLO`) détecte les joueurs sur chaque image.
+- Seuls les objets de classe `0` (personne) sont conservés, avec une confiance minimale de 0.5 et un seuil IOU de 0.7.
+
+2. Filtrage de zone
+- Les détections brutes sont transformées en `sv.Detections`.
+- Le code ne garde que celles qui sont à l’intérieur de la zone de court définie par `polygon_zone`.
+- Cela permet d’ignorer les personnes ou objets hors du terrain.
+
+3. Lissage ByteTrack
+- `self.byte_track.update_with_detections(...)` passe les détections dans ByteTrack.
+- ByteTrack aide à stabiliser les boîtes et à donner une association initiale entre détections successives.
+- Mais l’ID stable final est géré par la logique personnalisée de `PlayerTracker`.
+
+4. Gestion des pistes actives
+- `self.active_tracks` stocke pour chaque joueur actif :
+  - sa boîte englobante (`bbox`)
+  - sa vitesse estimée (`velocity`)
+  - sa boîte prédite (`predicted_bbox`)
+  - son compteur de disparition (`missed`)
+- Avant de matcher les nouvelles détections, chaque piste active prédit sa position suivante.
+- Si la position prédite est encore à l’intérieur du court, elle est utilisée.
+- Sinon, la piste est gelée au dernier endroit valide.
+
+5. Association des détections avec les pistes existantes
+- Le tracker calcule une matrice de coûts entre les pistes actives et les détections actuelles.
+- Le coût principal est la distance euclidienne entre les centres des boîtes.
+- Les pistes qui ont été perdues plus longtemps reçoivent une pénalité, ce qui favorise le maintien des IDs récents.
+- La correspondance est résolue globalement avec l’algorithme de Hongrois (`linear_sum_assignment`).
+- Cela réduit les erreurs de permutation d’ID lorsque deux joueurs sont proches.
+
+6. Mise à jour des IDs
+- Si une détection est associée à une piste existante, elle reprend le même `stable_id`.
+- La vitesse et la boîte de la piste sont mises à jour, et le compteur `missed` est remis à zéro.
+
+7. Création de nouveaux IDs
+- Si une détection ne correspond à aucune piste active et qu’il reste de la capacité, un nouvel ID est créé.
+- Le tracker limite le nombre de joueurs actifs à `self.max_players`.
+
+8. Suivi des joueurs manquants
+- Si une piste n’est pas matchée dans l’image actuelle, `missed` augmente.
+- Tant que `missed < fps * 2`, la piste reste active avec une boîte prédite.
+- Cela permet de conserver l’ID pendant environ 2 secondes de disparition partielle.
+
+Pourquoi les IDs ne changent pas quand deux joueurs sont proches
+- Les boîtes sont associées en fonction des positions prédites, pas de l’ordre brut des détections.
+- La logique globale de correspondance limite les permutations de paires.
+- Le suivi conserve une estimation de mouvement et favorise la piste la plus cohérente.
+
+En résumé
+- YOLO détecte les joueurs.
+- ByteTrack lisse les boîtes.
+- La logique personnalisée conserve des IDs stables en utilisant des prédictions, des vitesses, et un appariement global.
+- C’est cette combinaison qui empêche généralement les joueurs proches de permuter leur ID.
